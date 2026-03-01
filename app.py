@@ -5,7 +5,13 @@ import os
 
 # ================== CONFIG ==================
 
-client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
+API_KEY = os.getenv("GEMINI_API_KEY")
+
+if not API_KEY:
+    st.error("API key not found. Please set GEMINI_API_KEY environment variable.")
+    st.stop()
+
+client = genai.Client(api_key=API_KEY)
 
 # ================== GLOBAL STYLING ==================
 
@@ -19,6 +25,25 @@ st.markdown(
     """,
     unsafe_allow_html=True
 )
+
+# ================== SAFE JSON PARSER ==================
+
+def safe_parse_json(response):
+    try:
+        return json.loads(response.text)
+    except:
+        raw = response.text.strip()
+        start = raw.find("{")
+        end = raw.rfind("}")
+        if start == -1 or end == -1:
+            st.error("Model did not return valid JSON.")
+            st.write(raw)
+            st.stop()
+        json_text = raw[start:end+1]
+        json_text = json_text.replace("\\'", "'")
+        json_text = json_text.replace('\n', ' ')
+        json_text = json_text.replace('\r', ' ')
+        return json.loads(json_text)
 
 # ================== BRAND HEADER ==================
 
@@ -52,10 +77,6 @@ if "teaching_style" not in st.session_state:
     st.session_state.teaching_style = None
 if "slide_index" not in st.session_state:
     st.session_state.slide_index = 0
-if "socratic_step" not in st.session_state:
-    st.session_state.socratic_step = 0
-if "socratic_data" not in st.session_state:
-    st.session_state.socratic_data = None
 
 progress_map = {0: 0.33, 1: 0.66, 2: 1.0}
 st.progress(progress_map.get(st.session_state.stage, 0))
@@ -98,25 +119,21 @@ elif st.session_state.stage == 1:
         Student Answer:
         {student_answer}
 
-        Decide:
-        1) understanding_level → confused | partial | surface | deep
-        2) recommended_style → socratic | adaptive
-
-        Return ONLY JSON.
+        Return JSON:
+        {{
+          "understanding_level": "confused | partial | surface | deep",
+          "recommended_style": "socratic | adaptive"
+        }}
         """
 
         response = client.models.generate_content(
             model="gemini-2.5-flash",
-            contents=analysis_prompt
+            contents=analysis_prompt,
+            config={"response_mime_type": "application/json"}
         )
 
-        raw = response.text.strip()
-        start = raw.find("{")
-        end = raw.rfind("}")
-        analysis = json.loads(raw[start:end+1])
-
-        st.session_state.analysis = analysis
-        st.session_state.teaching_style = analysis["recommended_style"].capitalize()
+        st.session_state.analysis = json.loads(response.text)
+        st.session_state.teaching_style = st.session_state.analysis["recommended_style"]
         st.session_state.stage = 2
         st.rerun()
 
@@ -125,11 +142,36 @@ elif st.session_state.stage == 1:
 elif st.session_state.stage == 2:
 
     level = st.session_state.analysis["understanding_level"]
-    style = st.session_state.teaching_style
 
-    if style == "Socratic":
-        st.markdown("## 🧠 Socratic Interactive Mode")
-        st.write("Interactive reasoning mode activated.")
-    else:
-        st.markdown("## 📊 Adaptive Explanation")
-        st.write(f"Student level detected: {level}")
+    explanation_prompt = f"""
+    Student level: {level}
+
+    Return JSON:
+    {{
+      "slides": ["...", "...", "..."]
+    }}
+    """
+
+    response = client.models.generate_content(
+        model="gemini-2.5-flash",
+        contents=explanation_prompt,
+        config={"response_mime_type": "application/json"}
+    )
+
+    data = json.loads(response.text)
+    slides = data["slides"]
+
+    current = st.session_state.slide_index
+    st.write(slides[current])
+
+    col1, col2 = st.columns(2)
+
+    with col1:
+        if st.button("⬅ Previous") and current > 0:
+            st.session_state.slide_index -= 1
+            st.rerun()
+
+    with col2:
+        if st.button("Next ➡") and current < len(slides) - 1:
+            st.session_state.slide_index += 1
+            st.rerun()
